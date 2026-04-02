@@ -8,7 +8,7 @@ I've found that I often miss desktop notifications for meetings even though I ha
 - **macOS** (uses AppleScript to control Chrome)
 - **Google Chrome** with JavaScript from Apple Events enabled:
   - Chrome menu bar → **View** → **Developer** → **Allow JavaScript from Apple Events**
-- **Google Calendar API OAuth 2.0 credentials** (Desktop app type) from a [Google Cloud project](https://console.cloud.google.com/apis/credentials) with the Google Calendar API enabled
+- **Google Meet**
 
 ## Quick start
 
