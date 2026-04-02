@@ -6,9 +6,7 @@
     <string>com.meetjoiner</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/cody/meetjoiner/meetjoiner</string>
-        <string>-calendar</string>
-        <string>cody@madhive.com</string>
+        <string>/path/to/meetjoiner</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
