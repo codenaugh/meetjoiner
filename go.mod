@@ -1,4 +1,4 @@
-module github.com/codyaray/meetjoiner
+module github.com/codenaugh/meetjoiner
 
 go 1.25.0
 

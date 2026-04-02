@@ -11,59 +11,31 @@ It watches your Google Calendar for accepted meetings and, 2 minutes after the s
   - Chrome menu bar → **View** → **Developer** → **Allow JavaScript from Apple Events**
 - **Google Calendar API OAuth 2.0 credentials** (Desktop app type) from a [Google Cloud project](https://console.cloud.google.com/apis/credentials) with the Google Calendar API enabled
 
-## Setup
+## Quick start
 
-1. **Place your OAuth credentials:**
+```sh
+# Install the binary
+go install github.com/codenaugh/meetjoiner@latest
 
-   ```sh
-   mkdir -p ~/.config/meetjoiner
-   cp /path/to/client_secret_XXXXX.json ~/.config/meetjoiner/credentials.json
-   ```
+# Place your OAuth credentials
+mkdir -p ~/.config/meetjoiner
+cp /path/to/client_secret_XXXXX.json ~/.config/meetjoiner/credentials.json
 
-   The JSON should be an OAuth 2.0 Client ID of type "Desktop app." If you already have one (e.g., from another tool), you can reuse it.
+# First run — authenticates via browser
+meetjoiner -calendar you@example.com
 
-2. **Build:**
+# Install as a background service (runs on login)
+meetjoiner -calendar you@example.com install
+```
 
-   ```sh
-   go build -o meetjoiner .
-   ```
-
-3. **First run (authenticates via browser):**
-
-   ```sh
-   ./meetjoiner -calendar you@example.com
-   ```
-
-   A browser window will open for Google OAuth consent. After you approve, the token is saved to `~/.config/meetjoiner/token.json` and the daemon begins polling.
-
-4. **Install as a LaunchAgent (runs on login):**
-
-   First, edit `com.meetjoiner.plist` and replace the placeholder values:
-
-   - Change `/path/to/meetjoiner` to the absolute path to your built binary (e.g., `/Users/you/meetjoiner/meetjoiner`)
-   - Add `-calendar` and your calendar ID (typically your email) as additional `<string>` entries in the `ProgramArguments` array
-
-   For example:
-   ```xml
-   <key>ProgramArguments</key>
-   <array>
-       <string>/Users/you/meetjoiner/meetjoiner</string>
-       <string>-calendar</string>
-       <string>you@example.com</string>
-   </array>
-   ```
-
-   Then install it:
-
-   ```sh
-   cp com.meetjoiner.plist ~/Library/LaunchAgents/
-   launchctl load ~/Library/LaunchAgents/com.meetjoiner.plist
-   ```
+On first run, a browser window opens for Google OAuth consent. After you approve, the token is saved and the daemon begins polling your calendar.
 
 ## Usage
 
 ```
-./meetjoiner -calendar <calendar-id>
+meetjoiner -calendar <calendar-id>            # run in foreground
+meetjoiner -calendar <calendar-id> install    # install as LaunchAgent
+meetjoiner uninstall                          # remove LaunchAgent
 ```
 
 - `-calendar` — the Google Calendar ID to watch (typically your email address, defaults to `primary`)
@@ -92,7 +64,6 @@ launchctl unload ~/Library/LaunchAgents/com.meetjoiner.plist
 # Restart
 launchctl kickstart -k gui/$(id -u)/com.meetjoiner
 
-# Remove
-launchctl unload ~/Library/LaunchAgents/com.meetjoiner.plist
-rm ~/Library/LaunchAgents/com.meetjoiner.plist
+# Uninstall
+meetjoiner uninstall
 ```

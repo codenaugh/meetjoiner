@@ -25,11 +25,36 @@ const (
 	lookAheadWindow = 5 * time.Minute
 )
 
+const (
+	launchAgentLabel = "com.meetjoiner"
+	launchAgentDir   = "Library/LaunchAgents"
+	launchAgentFile  = launchAgentLabel + ".plist"
+)
+
 var calendarID = flag.String("calendar", "primary", "calendar ID to watch (e.g. user@example.com)")
 
 func main() {
 	flag.Parse()
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+
+	args := flag.Args()
+	if len(args) > 0 {
+		switch args[0] {
+		case "install":
+			if err := cmdInstall(); err != nil {
+				log.Fatalf("install failed: %v", err)
+			}
+			return
+		case "uninstall":
+			if err := cmdUninstall(); err != nil {
+				log.Fatalf("uninstall failed: %v", err)
+			}
+			return
+		default:
+			log.Fatalf("unknown command: %s (expected install or uninstall)", args[0])
+		}
+	}
+
 	log.Printf("meetjoiner starting up (calendar=%s)", *calendarID)
 
 	configDir, err := configDir()
@@ -62,6 +87,99 @@ func main() {
 		opened: make(map[string]bool),
 	}
 	poller.run(ctx)
+}
+
+func cmdInstall() error {
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("determine executable path: %w", err)
+	}
+	exe, err = filepath.EvalSymlinks(exe)
+	if err != nil {
+		return fmt.Errorf("resolve symlinks: %w", err)
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("determine home dir: %w", err)
+	}
+
+	plistPath := filepath.Join(home, launchAgentDir, launchAgentFile)
+
+	// Build ProgramArguments.
+	progArgs := fmt.Sprintf(`        <string>%s</string>`, exe)
+	if *calendarID != "primary" {
+		progArgs += fmt.Sprintf(`
+        <string>-calendar</string>
+        <string>%s</string>`, *calendarID)
+	}
+
+	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>%s</string>
+    <key>ProgramArguments</key>
+    <array>
+%s
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/tmp/meetjoiner.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/meetjoiner.log</string>
+</dict>
+</plist>
+`, launchAgentLabel, progArgs)
+
+	// Unload existing agent if present (ignore errors).
+	_ = exec.Command("launchctl", "unload", plistPath).Run()
+
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
+		return fmt.Errorf("create LaunchAgents dir: %w", err)
+	}
+	if err := os.WriteFile(plistPath, []byte(plist), 0o644); err != nil {
+		return fmt.Errorf("write plist: %w", err)
+	}
+
+	if err := exec.Command("launchctl", "load", plistPath).Run(); err != nil {
+		return fmt.Errorf("launchctl load: %w", err)
+	}
+
+	fmt.Printf("Installed and started LaunchAgent\n")
+	fmt.Printf("  plist: %s\n", plistPath)
+	fmt.Printf("  binary: %s\n", exe)
+	fmt.Printf("  calendar: %s\n", *calendarID)
+	fmt.Printf("  logs: /tmp/meetjoiner.log\n")
+	return nil
+}
+
+func cmdUninstall() error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("determine home dir: %w", err)
+	}
+
+	plistPath := filepath.Join(home, launchAgentDir, launchAgentFile)
+
+	if _, err := os.Stat(plistPath); os.IsNotExist(err) {
+		fmt.Println("LaunchAgent not installed, nothing to do.")
+		return nil
+	}
+
+	if err := exec.Command("launchctl", "unload", plistPath).Run(); err != nil {
+		fmt.Printf("warning: launchctl unload: %v\n", err)
+	}
+	if err := os.Remove(plistPath); err != nil {
+		return fmt.Errorf("remove plist: %w", err)
+	}
+
+	fmt.Printf("Uninstalled LaunchAgent (removed %s)\n", plistPath)
+	return nil
 }
 
 func configDir() (string, error) {
