@@ -38,7 +38,22 @@ It watches your Google Calendar for accepted meetings and, 2 minutes after the s
 
 4. **Install as a LaunchAgent (runs on login):**
 
-   Edit `com.meetjoiner.plist` to set your binary path and calendar ID, then:
+   First, edit `com.meetjoiner.plist` and replace the placeholder values:
+
+   - Change `/path/to/meetjoiner` to the absolute path to your built binary (e.g., `/Users/you/meetjoiner/meetjoiner`)
+   - Add `-calendar` and your calendar ID (typically your email) as additional `<string>` entries in the `ProgramArguments` array
+
+   For example:
+   ```xml
+   <key>ProgramArguments</key>
+   <array>
+       <string>/Users/you/meetjoiner/meetjoiner</string>
+       <string>-calendar</string>
+       <string>you@example.com</string>
+   </array>
+   ```
+
+   Then install it:
 
    ```sh
    cp com.meetjoiner.plist ~/Library/LaunchAgents/
