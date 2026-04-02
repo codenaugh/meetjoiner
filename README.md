@@ -30,7 +30,7 @@ meetjoiner -calendar you@example.com install
 ## Usage
 
 ```
-meetjoiner auth                              # authenticate with Google
+meetjoiner auth                               # authenticate with Google
 meetjoiner -calendar <calendar-id>            # run in foreground
 meetjoiner -calendar <calendar-id> install    # install as LaunchAgent
 meetjoiner uninstall                          # remove LaunchAgent
