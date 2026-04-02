@@ -1,8 +1,7 @@
 # meetjoiner
 
-A background daemon that automatically joins your Google Meet meetings with mic and camera off.
+I've found that I often miss desktop notifications for meetings even though I have several reminders set up. To address this, I've created `meetjoiner`, which watches your Google Calendar for accepted meetings and, 2 minutes after the scheduled start time, if you are not already in the meeting, opens the Meet link in Chrome, mutes mic/camera, and clicks "Join now". The 2 minute buffer provides a space in case you haven't joined due to wrapping up another meeting.
 
-It watches your Google Calendar for accepted meetings and, 2 minutes after the scheduled start time, opens the Meet link in Chrome, mutes mic/camera, and clicks "Join now."
 
 ## Requirements
 
