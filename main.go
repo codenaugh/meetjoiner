@@ -50,8 +50,13 @@ func main() {
 				log.Fatalf("uninstall failed: %v", err)
 			}
 			return
+		case "auth":
+			if err := cmdAuth(); err != nil {
+				log.Fatalf("auth failed: %v", err)
+			}
+			return
 		default:
-			log.Fatalf("unknown command: %s (expected install or uninstall)", args[0])
+			log.Fatalf("unknown command: %s (expected install, uninstall, or auth)", args[0])
 		}
 	}
 
@@ -155,6 +160,49 @@ func cmdInstall() error {
 	fmt.Printf("  binary: %s\n", exe)
 	fmt.Printf("  calendar: %s\n", *calendarID)
 	fmt.Printf("  logs: /tmp/meetjoiner.log\n")
+	return nil
+}
+
+func cmdAuth() error {
+	dir, err := configDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+
+	credFile := filepath.Join(dir, "credentials.json")
+	if _, err := os.Stat(credFile); os.IsNotExist(err) {
+		return fmt.Errorf("missing %s — download OAuth client credentials from Google Cloud Console and place them there", credFile)
+	}
+
+	tokFile := filepath.Join(dir, "token.json")
+	if _, err := loadToken(tokFile); err == nil {
+		fmt.Println("Already authenticated (token exists at " + tokFile + ").")
+		fmt.Println("Delete it and re-run auth to re-authenticate.")
+		return nil
+	}
+
+	b, err := os.ReadFile(credFile)
+	if err != nil {
+		return fmt.Errorf("read credentials: %w", err)
+	}
+	config, err := google.ConfigFromJSON(b, calendar.CalendarReadonlyScope)
+	if err != nil {
+		return fmt.Errorf("parse credentials: %w", err)
+	}
+
+	ctx := context.Background()
+	tok, err := getTokenFromWeb(ctx, config)
+	if err != nil {
+		return fmt.Errorf("get token: %w", err)
+	}
+	if err := saveToken(tokFile, tok); err != nil {
+		return fmt.Errorf("save token: %w", err)
+	}
+
+	fmt.Println("Authenticated successfully! Token saved to " + tokFile)
 	return nil
 }
 

@@ -20,18 +20,17 @@ go install github.com/codenaugh/meetjoiner@latest
 mkdir -p ~/.config/meetjoiner
 cp /path/to/client_secret_XXXXX.json ~/.config/meetjoiner/credentials.json
 
-# First run — authenticates via browser
-meetjoiner -calendar you@example.com
+# Authenticate (opens browser for Google OAuth consent)
+meetjoiner auth
 
 # Install as a background service (runs on login)
 meetjoiner -calendar you@example.com install
 ```
 
-On first run, a browser window opens for Google OAuth consent. After you approve, the token is saved and the daemon begins polling your calendar.
-
 ## Usage
 
 ```
+meetjoiner auth                              # authenticate with Google
 meetjoiner -calendar <calendar-id>            # run in foreground
 meetjoiner -calendar <calendar-id> install    # install as LaunchAgent
 meetjoiner uninstall                          # remove LaunchAgent
