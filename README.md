@@ -16,7 +16,7 @@ I've found that I often miss desktop notifications for meetings even though I ha
 # Install the binary
 go install github.com/codenaugh/meetjoiner@latest
 
-# Place your OAuth credentials
+# Place your Google Calendar or Google Workspace OAuth credentials
 mkdir -p ~/.config/meetjoiner
 cp /path/to/client_secret_XXXXX.json ~/.config/meetjoiner/credentials.json
 
