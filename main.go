@@ -542,7 +542,7 @@ func isAccepted(event *calendar.Event) bool {
 		return true
 	}
 	for _, a := range event.Attendees {
-		if a.Self && (a.ResponseStatus == "accepted" || a.ResponseStatus == "tentative") {
+		if a.Self && a.ResponseStatus == "accepted" {
 			return true
 		}
 	}
