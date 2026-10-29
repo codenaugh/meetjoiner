@@ -2,26 +2,24 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/google"
-	"google.golang.org/api/calendar/v3"
-	"google.golang.org/api/option"
 )
 
 const (
-	pollInterval = 30 * time.Second
-	// How far ahead to look for events.
+	pollInterval    = 30 * time.Second
 	lookAheadWindow = 5 * time.Minute
 )
 
@@ -29,9 +27,13 @@ const (
 	launchAgentLabel = "com.meetjoiner"
 	launchAgentDir   = "Library/LaunchAgents"
 	launchAgentFile  = launchAgentLabel + ".plist"
+	appBundleRelPath = "Library/Application Support/MeetJoiner.app"
 )
 
-var calendarID = flag.String("calendar", "primary", "calendar ID to watch (e.g. user@example.com)")
+//go:embed Info.plist
+var embeddedInfoPlist []byte
+
+var calendarID = flag.String("calendar", "all", "calendar name or account to watch (defaults to all synced calendars)")
 
 func main() {
 	flag.Parse()
@@ -50,48 +52,61 @@ func main() {
 				log.Fatalf("uninstall failed: %v", err)
 			}
 			return
-		case "auth":
-			if err := cmdAuth(); err != nil {
-				log.Fatalf("auth failed: %v", err)
+		case "calendars":
+			if err := cmdCalendars(); err != nil {
+				log.Fatalf("calendars failed: %v", err)
 			}
 			return
+		case "test-popup":
+			if err := cmdTestPopup(); err != nil {
+				log.Fatalf("test-popup failed: %v", err)
+			}
+			return
+		case "popup-ui":
+			runtime.LockOSThread()
+			cmdPopupUI(args[1:])
+			return
 		default:
-			log.Fatalf("unknown command: %s (expected install, uninstall, or auth)", args[0])
+			log.Fatalf("unknown command: %s (expected install, uninstall, calendars, or test-popup)", args[0])
 		}
 	}
 
 	log.Printf("meetjoiner starting up (calendar=%s)", *calendarID)
 
-	configDir, err := configDir()
+	cfgDir, err := configDir()
 	if err != nil {
 		log.Fatalf("failed to determine config dir: %v", err)
 	}
-	if err := os.MkdirAll(configDir, 0o700); err != nil {
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
 		log.Fatalf("failed to create config dir: %v", err)
 	}
 
-	credFile := filepath.Join(configDir, "credentials.json")
-	if _, err := os.Stat(credFile); os.IsNotExist(err) {
-		log.Fatalf("missing %s — download OAuth client credentials from Google Cloud Console and place them there", credFile)
+	if err := ensureCalendarAccess(); err != nil {
+		log.Fatalf("calendar access failed: %v", err)
 	}
 
-	ctx := context.Background()
-	client, err := getClient(ctx, configDir, credFile)
-	if err != nil {
-		log.Fatalf("failed to get OAuth client: %v", err)
-	}
-
-	srv, err := calendar.NewService(ctx, option.WithHTTPClient(client))
-	if err != nil {
-		log.Fatalf("failed to create calendar service: %v", err)
-	}
-
-	log.Println("authenticated — polling calendar")
+	log.Println("macOS Calendar access granted — polling calendar")
 	poller := &meetPoller{
-		srv:    srv,
-		opened: make(map[string]bool),
+		configDir: cfgDir,
+		scheduled: make(map[string]bool),
 	}
-	poller.run(ctx)
+	poller.run(context.Background())
+}
+
+func cmdCalendars() error {
+	cals, err := getCalendars()
+	if err != nil {
+		return err
+	}
+	if len(cals) == 0 {
+		fmt.Println("No calendars found in macOS Calendar.")
+		return nil
+	}
+	fmt.Println("Synced macOS Calendars:")
+	for _, c := range cals {
+		fmt.Printf("  • %s (Account: %s)\n", c.Title, c.Source)
+	}
+	return nil
 }
 
 func cmdInstall() error {
@@ -109,11 +124,36 @@ func cmdInstall() error {
 		return fmt.Errorf("determine home dir: %w", err)
 	}
 
+	// Build a lightweight background .app bundle so macOS TCC can prompt and
+	// grant Calendar permission to MeetJoiner.app independently of Terminal/IDE.
+	appDir := filepath.Join(home, appBundleRelPath)
+	macOSDir := filepath.Join(appDir, "Contents", "MacOS")
+	infoPlistPath := filepath.Join(appDir, "Contents", "Info.plist")
+	bundleExe := filepath.Join(macOSDir, "meetjoiner")
+
+	if err := os.MkdirAll(macOSDir, 0o755); err != nil {
+		return fmt.Errorf("create app bundle dir: %w", err)
+	}
+	if err := os.WriteFile(infoPlistPath, embeddedInfoPlist, 0o644); err != nil {
+		return fmt.Errorf("write bundle Info.plist: %w", err)
+	}
+	if exe != bundleExe {
+		if err := copyFile(exe, bundleExe, 0o755); err != nil {
+			return fmt.Errorf("copy binary to app bundle: %w", err)
+		}
+	}
+	if out, err := exec.Command("codesign", "-s", "-", "--force", "--deep", appDir).CombinedOutput(); err != nil {
+		return fmt.Errorf("codesign app bundle: %w (%s)", err, out)
+	}
+
+	// Trigger the macOS Calendar permission check via LaunchServices so TCC
+	// attributes the prompt to MeetJoiner.app.
+	_ = exec.Command("open", "-W", appDir, "--args", "calendars").Run()
+
 	plistPath := filepath.Join(home, launchAgentDir, launchAgentFile)
 
-	// Build ProgramArguments.
-	progArgs := fmt.Sprintf(`        <string>%s</string>`, exe)
-	if *calendarID != "primary" {
+	progArgs := fmt.Sprintf(`        <string>%s</string>`, bundleExe)
+	if *calendarID != "all" && *calendarID != "" {
 		progArgs += fmt.Sprintf(`
         <string>-calendar</string>
         <string>%s</string>`, *calendarID)
@@ -141,7 +181,6 @@ func cmdInstall() error {
 </plist>
 `, launchAgentLabel, progArgs)
 
-	// Unload existing agent if present (ignore errors).
 	_ = exec.Command("launchctl", "unload", plistPath).Run()
 
 	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
@@ -156,53 +195,10 @@ func cmdInstall() error {
 	}
 
 	fmt.Printf("Installed and started LaunchAgent\n")
-	fmt.Printf("  plist: %s\n", plistPath)
-	fmt.Printf("  binary: %s\n", exe)
+	fmt.Printf("  app:      %s\n", appDir)
+	fmt.Printf("  plist:    %s\n", plistPath)
 	fmt.Printf("  calendar: %s\n", *calendarID)
-	fmt.Printf("  logs: /tmp/meetjoiner.log\n")
-	return nil
-}
-
-func cmdAuth() error {
-	dir, err := configDir()
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-
-	credFile := filepath.Join(dir, "credentials.json")
-	if _, err := os.Stat(credFile); os.IsNotExist(err) {
-		return fmt.Errorf("missing %s — download OAuth client credentials from Google Cloud Console and place them there", credFile)
-	}
-
-	tokFile := filepath.Join(dir, "token.json")
-	if _, err := loadToken(tokFile); err == nil {
-		fmt.Println("Already authenticated (token exists at " + tokFile + ").")
-		fmt.Println("Delete it and re-run auth to re-authenticate.")
-		return nil
-	}
-
-	b, err := os.ReadFile(credFile)
-	if err != nil {
-		return fmt.Errorf("read credentials: %w", err)
-	}
-	config, err := google.ConfigFromJSON(b, calendar.CalendarReadonlyScope)
-	if err != nil {
-		return fmt.Errorf("parse credentials: %w", err)
-	}
-
-	ctx := context.Background()
-	tok, err := getTokenFromWeb(ctx, config)
-	if err != nil {
-		return fmt.Errorf("get token: %w", err)
-	}
-	if err := saveToken(tokFile, tok); err != nil {
-		return fmt.Errorf("save token: %w", err)
-	}
-
-	fmt.Println("Authenticated successfully! Token saved to " + tokFile)
+	fmt.Printf("  logs:     /tmp/meetjoiner.log\n")
 	return nil
 }
 
@@ -216,18 +212,46 @@ func cmdUninstall() error {
 
 	if _, err := os.Stat(plistPath); os.IsNotExist(err) {
 		fmt.Println("LaunchAgent not installed, nothing to do.")
-		return nil
+	} else {
+		if err := exec.Command("launchctl", "unload", plistPath).Run(); err != nil {
+			fmt.Printf("warning: launchctl unload: %v\n", err)
+		}
+		if err := os.Remove(plistPath); err != nil {
+			return fmt.Errorf("remove plist: %w", err)
+		}
+		fmt.Printf("Uninstalled LaunchAgent (removed %s)\n", plistPath)
 	}
 
-	if err := exec.Command("launchctl", "unload", plistPath).Run(); err != nil {
-		fmt.Printf("warning: launchctl unload: %v\n", err)
+	appDir := filepath.Join(home, appBundleRelPath)
+	if _, err := os.Stat(appDir); err == nil {
+		_ = os.RemoveAll(appDir)
+		fmt.Printf("Removed %s\n", appDir)
 	}
-	if err := os.Remove(plistPath); err != nil {
-		return fmt.Errorf("remove plist: %w", err)
-	}
-
-	fmt.Printf("Uninstalled LaunchAgent (removed %s)\n", plistPath)
 	return nil
+}
+
+func copyFile(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	tmp := dst + ".tmp"
+	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, dst)
 }
 
 func configDir() (string, error) {
@@ -238,85 +262,71 @@ func configDir() (string, error) {
 	return filepath.Join(home, ".config", "meetjoiner"), nil
 }
 
-// getClient returns an HTTP client with a valid OAuth2 token.
-// On first run it opens the browser for consent.
-func getClient(ctx context.Context, configDir, credFile string) (*http.Client, error) {
-	b, err := os.ReadFile(credFile)
-	if err != nil {
-		return nil, fmt.Errorf("read credentials: %w", err)
-	}
-
-	config, err := google.ConfigFromJSON(b, calendar.CalendarReadonlyScope)
-	if err != nil {
-		return nil, fmt.Errorf("parse credentials: %w", err)
-	}
-
-	tokFile := filepath.Join(configDir, "token.json")
-	tok, err := loadToken(tokFile)
-	if err != nil {
-		tok, err = getTokenFromWeb(ctx, config)
-		if err != nil {
-			return nil, fmt.Errorf("get token from web: %w", err)
-		}
-		if err := saveToken(tokFile, tok); err != nil {
-			return nil, fmt.Errorf("save token: %w", err)
-		}
-	}
-
-	return config.Client(ctx, tok), nil
+type userPrefs struct {
+	AudioOn bool `json:"audio_on"`
+	VideoOn bool `json:"video_on"`
 }
 
-func loadToken(path string) (*oauth2.Token, error) {
-	f, err := os.Open(path)
+func prefsPath(cfgDir string) string {
+	return filepath.Join(cfgDir, "preferences.json")
+}
+
+// loadPrefs loads the last saved audio/video settings, defaulting to both off.
+func loadPrefs(cfgDir string) userPrefs {
+	f, err := os.Open(prefsPath(cfgDir))
 	if err != nil {
-		return nil, err
+		return userPrefs{AudioOn: false, VideoOn: false}
 	}
 	defer f.Close()
-	tok := &oauth2.Token{}
-	return tok, json.NewDecoder(f).Decode(tok)
+	var p userPrefs
+	if err := json.NewDecoder(f).Decode(&p); err != nil {
+		return userPrefs{AudioOn: false, VideoOn: false}
+	}
+	return p
 }
 
-func saveToken(path string, tok *oauth2.Token) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+func savePrefs(cfgDir string, p userPrefs) error {
+	if err := os.MkdirAll(cfgDir, 0o700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(prefsPath(cfgDir), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	return json.NewEncoder(f).Encode(tok)
+	return json.NewEncoder(f).Encode(p)
 }
 
-func getTokenFromWeb(ctx context.Context, config *oauth2.Config) (*oauth2.Token, error) {
-	// Use a local redirect so the user doesn't have to copy-paste a code.
-	config.RedirectURL = "http://localhost:8089/callback"
-
-	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
-	fmt.Printf("Opening browser for Google authorization...\n")
-	_ = exec.Command("open", authURL).Start()
-	fmt.Printf("If the browser didn't open, visit:\n%s\n", authURL)
-
-	codeCh := make(chan string, 1)
-	srv := &http.Server{Addr: ":8089"}
-	http.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		code := r.URL.Query().Get("code")
-		codeCh <- code
-		fmt.Fprintf(w, "<h1>Authorized! You can close this tab.</h1>")
-	})
-
-	go func() { _ = srv.ListenAndServe() }()
-	code := <-codeCh
-	_ = srv.Shutdown(ctx)
-
-	return config.Exchange(ctx, code)
+func cmdTestPopup() error {
+	cfgDir, err := configDir()
+	if err != nil {
+		return err
+	}
+	prefs := loadPrefs(cfgDir)
+	res, err := promptJoinDialog(
+		"Weekly Product & Engineering Sync",
+		"with Sarah Jenkins, Alex Rivera + 3 others",
+		time.Now(),
+		prefs,
+	)
+	if err != nil {
+		return err
+	}
+	if err := savePrefs(cfgDir, userPrefs{AudioOn: res.AudioOn, VideoOn: res.VideoOn}); err != nil {
+		log.Printf("failed to save preferences: %v", err)
+	}
+	fmt.Printf("Result: action=%s, audio_on=%v, video_on=%v (saved to %s)\n",
+		res.Action, res.AudioOn, res.VideoOn, prefsPath(cfgDir))
+	return nil
 }
 
 type meetPoller struct {
-	srv    *calendar.Service
-	mu     sync.Mutex
-	opened map[string]bool // event IDs we've already opened
+	configDir string
+	mu        sync.Mutex
+	scheduled map[string]bool // event IDs we've already scheduled/prompted
 }
 
 func (p *meetPoller) run(ctx context.Context) {
-	// Do an immediate check, then tick.
 	p.check(ctx)
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -332,74 +342,164 @@ func (p *meetPoller) run(ctx context.Context) {
 
 func (p *meetPoller) check(ctx context.Context) {
 	now := time.Now()
-	tMin := now.Format(time.RFC3339)
-	tMax := now.Add(lookAheadWindow).Format(time.RFC3339)
+	tMin := now.Add(-1 * time.Minute)
+	tMax := now.Add(lookAheadWindow)
 
-	events, err := p.srv.Events.List(*calendarID).
-		ShowDeleted(false).
-		SingleEvents(true).
-		TimeMin(tMin).
-		TimeMax(tMax).
-		OrderBy("startTime").
-		Do()
+	events, err := fetchUpcomingEvents(*calendarID, tMin, tMax)
 	if err != nil {
-		log.Printf("calendar list error: %v", err)
+		log.Printf("calendar fetch error: %v", err)
 		return
 	}
 
-	for _, event := range events.Items {
-		p.maybeOpen(event, now)
+	for _, event := range events {
+		p.maybeSchedule(ctx, event)
 	}
 }
 
-func (p *meetPoller) maybeOpen(event *calendar.Event, now time.Time) {
-	// Only care about events with Google Meet links.
-	meetLink := extractMeetLink(event)
+func (p *meetPoller) maybeSchedule(ctx context.Context, event localEvent) {
+	meetLink := extractMeetLinkFromEvent(event)
 	if meetLink == "" {
 		return
 	}
 
-	// Only open events the user has accepted (or is the organizer).
-	if !isAccepted(event) {
-		return
-	}
-
-	// Parse the start time.
-	start, err := parseEventTime(event.Start)
-	if err != nil {
-		log.Printf("failed to parse start time for %q: %v", event.Summary, err)
-		return
-	}
-
-	// Join 2 minutes after start time (buffer for back-to-back meetings).
-	joinAt := start.Add(2 * time.Minute)
-	diff := time.Until(joinAt)
-	if diff > 15*time.Second || diff < -5*time.Minute {
+	start := time.Unix(event.StartUnix, 0)
+	diff := time.Until(start)
+	if diff > lookAheadWindow || diff < -5*time.Minute {
 		return
 	}
 
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.opened[event.Id] {
+	if p.scheduled[event.ID] {
+		p.mu.Unlock()
 		return
 	}
-	p.opened[event.Id] = true
+	if len(p.scheduled) > 200 {
+		p.scheduled = make(map[string]bool)
+	}
+	p.scheduled[event.ID] = true
+	p.mu.Unlock()
 
-	// Check if already in this meeting (a Chrome tab with this Meet URL is active and past the pre-join screen).
-	if isMeetAlreadyOpen(meetLink) {
-		log.Printf("already in meeting: %s — skipping", event.Summary)
-		return
+	subtitle := formatAttendeeList(event.Attendees)
+	go p.promptAtStart(ctx, event.Summary, subtitle, meetLink, start)
+}
+
+func (p *meetPoller) promptAtStart(ctx context.Context, summary, subtitle, meetLink string, start time.Time) {
+	if wait := time.Until(start); wait > 0 {
+		log.Printf("scheduled join prompt for %q at %s (in %s)", summary, start.Format(time.Kitchen), wait.Round(time.Second))
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
 	}
 
-	log.Printf("opening meeting: %s (%s)", event.Summary, meetLink)
-	if err := openMeetMuted(meetLink); err != nil {
-		log.Printf("failed to open %s: %v", meetLink, err)
+	for {
+		if isMeetAlreadyOpen(meetLink) {
+			log.Printf("already in meeting: %s — skipping", summary)
+			return
+		}
+
+		prefs := loadPrefs(p.configDir)
+		log.Printf("prompting to join meeting: %s (%s)", summary, meetLink)
+		res, err := promptJoinDialog(summary, subtitle, start, prefs)
+		if err != nil {
+			log.Printf("failed to display join prompt for %q: %v", summary, err)
+			return
+		}
+
+		if err := savePrefs(p.configDir, userPrefs{AudioOn: res.AudioOn, VideoOn: res.VideoOn}); err != nil {
+			log.Printf("failed to save preferences: %v", err)
+		}
+
+		switch res.Action {
+		case "snooze":
+			log.Printf("snoozed meeting %q for 2 minutes", summary)
+			snoozeTimer := time.NewTimer(2 * time.Minute)
+			select {
+			case <-ctx.Done():
+				snoozeTimer.Stop()
+				return
+			case <-snoozeTimer.C:
+				continue
+			}
+		case "join":
+			log.Printf("joining meeting: %s (%s) [audio=%v, video=%v]", summary, meetLink, res.AudioOn, res.VideoOn)
+			if err := openMeet(meetLink, res.AudioOn, res.VideoOn); err != nil {
+				log.Printf("failed to open %s: %v", meetLink, err)
+			}
+			return
+		default:
+			log.Printf("dismissed meeting: %s", summary)
+			return
+		}
+	}
+}
+
+type dialogResult struct {
+	Action  string `json:"action"`
+	AudioOn bool   `json:"audio_on"`
+	VideoOn bool   `json:"video_on"`
+}
+
+func cmdPopupUI(args []string) {
+	summary := "Google Meet"
+	subtitle := ""
+	startStr := time.Now().Local().Format("3:04 PM")
+	startUnix := time.Now().Unix()
+	var defaults userPrefs
+	if len(args) > 0 {
+		summary = args[0]
+	}
+	if len(args) > 1 {
+		subtitle = args[1]
+	}
+	if len(args) > 2 {
+		startStr = args[2]
+	}
+	if len(args) > 3 {
+		if v, err := strconv.ParseInt(args[3], 10, 64); err == nil {
+			startUnix = v
+		}
+	}
+	if len(args) > 4 {
+		defaults.AudioOn = args[4] == "true"
+	}
+	if len(args) > 5 {
+		defaults.VideoOn = args[5] == "true"
+	}
+	res := runPopupUI(summary, subtitle, startStr, startUnix, defaults)
+	_ = json.NewEncoder(os.Stdout).Encode(res)
+}
+
+func promptJoinDialog(summary, subtitle string, start time.Time, defaults userPrefs) (dialogResult, error) {
+	if summary == "" {
+		summary = "Google Meet"
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return dialogResult{}, fmt.Errorf("determine executable path: %w", err)
 	}
 
-	// Prune old entries to avoid unbounded growth.
-	if len(p.opened) > 200 {
-		p.opened = make(map[string]bool)
+	out, err := exec.Command(
+		exe, "popup-ui",
+		summary,
+		subtitle,
+		start.Local().Format("3:04 PM"),
+		strconv.FormatInt(start.Unix(), 10),
+		strconv.FormatBool(defaults.AudioOn),
+		strconv.FormatBool(defaults.VideoOn),
+	).CombinedOutput()
+	if err != nil {
+		return dialogResult{}, fmt.Errorf("%w: %s", err, out)
 	}
+
+	var res dialogResult
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &res); err != nil {
+		return dialogResult{}, fmt.Errorf("parse dialog output %q: %w", string(out), err)
+	}
+	return res, nil
 }
 
 // isMeetAlreadyOpen checks if the user is already in this meeting in Chrome.
@@ -425,12 +525,36 @@ end tell`
 	return string(out) == "found\n"
 }
 
-// openMeetMuted opens a Google Meet link in Chrome, mutes mic/camera, and
-// clicks "Join now."
-func openMeetMuted(meetLink string) error {
+// openMeet opens a Google Meet link in Chrome, configures mic/camera according
+// to audioOn and videoOn, and clicks "Join now."
+func openMeet(meetLink string, audioOn, videoOn bool) error {
+	micLabel := "Turn off microphone"
+	if audioOn {
+		micLabel = "Turn on microphone"
+	}
+	camLabel := "Turn off camera"
+	if videoOn {
+		camLabel = "Turn on camera"
+	}
+
+	fallbackMute := ""
+	if !audioOn && !videoOn {
+		fallbackMute = `
+	-- Fallback: click any unmuted data-is-muted toggles.
+	try
+		execute meetTab javascript "document.querySelectorAll('[data-is-muted=\"false\"]').forEach(function(b) { b.click(); });"
+	end try
+
+	delay 0.5
+`
+	}
+
 	script := `
 tell application "Google Chrome"
 	activate
+	if (count of windows) is 0 then
+		make new window
+	end if
 	-- Open a new tab, then navigate to the Meet URL.
 	-- (Setting URL after creation avoids Meet redirecting to the landing page.)
 	tell front window
@@ -479,27 +603,20 @@ tell application "Google Chrome"
 		delay 1
 	end repeat
 
-	-- Mute mic if unmuted.
+	-- Set microphone state.
 	try
-		execute meetTab javascript "var m = document.querySelector('[aria-label*=\"Turn off microphone\"]'); if (m) m.click();"
+		execute meetTab javascript "var m = document.querySelector('[aria-label*=\"` + micLabel + `\"]'); if (m) m.click();"
 	end try
 
 	delay 0.5
 
-	-- Mute camera if unmuted.
+	-- Set camera state.
 	try
-		execute meetTab javascript "var c = document.querySelector('[aria-label*=\"Turn off camera\"]'); if (c) c.click();"
+		execute meetTab javascript "var c = document.querySelector('[aria-label*=\"` + camLabel + `\"]'); if (c) c.click();"
 	end try
 
 	delay 0.5
-
-	-- Fallback: click any unmuted data-is-muted toggles.
-	try
-		execute meetTab javascript "document.querySelectorAll('[data-is-muted=\"false\"]').forEach(function(b) { b.click(); });"
-	end try
-
-	delay 0.5
-
+` + fallbackMute + `
 	-- Click "Join now" (or "Ask to join").
 	try
 		execute meetTab javascript "
@@ -522,37 +639,4 @@ end tell`
 		return fmt.Errorf("%w: %s", err, out)
 	}
 	return nil
-}
-
-func extractMeetLink(event *calendar.Event) string {
-	if event.ConferenceData != nil {
-		for _, ep := range event.ConferenceData.EntryPoints {
-			if ep.EntryPointType == "video" && ep.Uri != "" {
-				return ep.Uri
-			}
-		}
-	}
-	// Fallback: HangoutLink field.
-	return event.HangoutLink
-}
-
-func isAccepted(event *calendar.Event) bool {
-	if event.Attendees == nil {
-		// No attendees list means the user is the sole organizer — treat as accepted.
-		return true
-	}
-	for _, a := range event.Attendees {
-		if a.Self && a.ResponseStatus == "accepted" {
-			return true
-		}
-	}
-	return false
-}
-
-func parseEventTime(et *calendar.EventDateTime) (time.Time, error) {
-	if et.DateTime != "" {
-		return time.Parse(time.RFC3339, et.DateTime)
-	}
-	// All-day event — skip.
-	return time.Time{}, fmt.Errorf("all-day event")
 }

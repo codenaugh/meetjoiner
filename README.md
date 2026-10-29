@@ -1,50 +1,72 @@
 # meetjoiner
 
-I've found that I often miss desktop notifications for meetings even though I have several reminders set up. To address this, I've created `meetjoiner`, which watches your Google Calendar for accepted meetings and, 2 minutes after the scheduled start time, if you are not already in the meeting, opens the Meet link in Chrome, mutes mic/camera, and clicks "Join now". The 2 minute buffer provides a space in case you haven't joined due to wrapping up another meeting.
+`meetjoiner` watches your macOS Calendar for accepted meetings and, right at the scheduled start time, if you are not already in the meeting, displays a floating macOS HUD card centered on your current virtual desktop.
 
+From the HUD card you can toggle **Microphone** and **Camera** (remembering your last settings, or defaulting to both off), **Snooze 2m**, or click **Join Meeting** to open Chrome, apply your mic/camera state on the pre-join screen, and join automatically.
 
 ## Requirements
 
-- **macOS** (uses AppleScript to control Chrome)
-- **Google Chrome** with JavaScript from Apple Events enabled:
-  - Chrome menu bar → **View** → **Developer** → **Allow JavaScript from Apple Events**
-- **Google Calendar API OAuth 2.0 credentials** (Desktop app type) from a [Google Cloud project](https://console.cloud.google.com/apis/credentials) with the Google Calendar API enabled
-- Only works with **Google Meet**
+1. **macOS Calendar**: Add your Google account under **System Settings → Internet Accounts** (with **Calendars** enabled so your meetings sync to the built-in macOS Calendar app).
+2. **Google Chrome** with **Allow JavaScript from Apple Events** enabled (required so `meetjoiner` can toggle your mic/camera and click "Join now" on the Meet pre-join screen):
+   - In the Chrome menu bar, go to **View** → **Developer** → **Allow JavaScript from Apple Events** and make sure it is checked.
+3. Only works with **Google Meet**.
 
 ## Quick start
 
+1. In Chrome, enable **View → Developer → Allow JavaScript from Apple Events**.
+2. Clone, build, and install the background service:
+
 ```sh
-# Install the binary
-go install github.com/codenaugh/meetjoiner@latest
+git clone https://github.com/codenaugh/meetjoiner.git
+cd meetjoiner
 
-# Place your Google Calendar or Google Workspace OAuth credentials
-mkdir -p ~/.config/meetjoiner
-cp /path/to/client_secret_XXXXX.json ~/.config/meetjoiner/credentials.json
+# 1. Compile the Go source and put the `meetjoiner` CLI binary in ~/go/bin
+go install
 
-# Authenticate (opens browser for Google OAuth consent)
-meetjoiner auth
+# 2. Package MeetJoiner.app, grant Calendar access, and start the background LaunchAgent on login
+meetjoiner install
+```
 
-# Install as a background service (runs on login)
+Or to watch a specific calendar/account only:
+
+```sh
+# List your synced macOS calendars
+meetjoiner calendars
+
+# Install watching only a specific calendar or account
 meetjoiner -calendar you@example.com install
+```
+
+To preview the HUD pop-up at any time:
+
+```sh
+meetjoiner test-popup
 ```
 
 ## Usage
 
 ```
-meetjoiner auth                               # authenticate with Google
-meetjoiner -calendar <calendar-id>            # run in foreground
-meetjoiner -calendar <calendar-id> install    # install as LaunchAgent
+meetjoiner install                            # grant Calendar access and install as LaunchAgent
+meetjoiner -calendar <name-or-email> install  # watch only matching calendar/account
+meetjoiner calendars                          # list synced macOS calendars
+meetjoiner test-popup                         # preview the HUD & save default audio/video prefs
+meetjoiner                                    # run in foreground
 meetjoiner uninstall                          # remove LaunchAgent
 ```
 
-- `-calendar` — the Google Calendar ID to watch (typically your email address, defaults to `primary`)
+- `-calendar` — optional filter matching the calendar title or account name in macOS Calendar (defaults to `all`)
 
 ## How it works
 
-- Polls Google Calendar every 30 seconds, looking 5 minutes ahead
-- Filters for events you've accepted (or organized) that have a Google Meet link
-- 2 minutes after the scheduled start time, checks if you're already in the meeting (by scanning Chrome tabs)
-- If not, opens the Meet link in a new Chrome tab, waits for the pre-join screen, turns off mic and camera, and clicks "Join now"
+- Queries macOS `EventKit` every 30 seconds, looking 5 minutes ahead (zero Google Cloud / OAuth setup required)
+- Filters for events you've accepted (or organized) that contain a Google Meet link
+- Schedules a timer for the exact start time of the meeting
+- At the start time, checks if you're already in the meeting (by scanning Chrome tabs)
+- If not, pops up a native frosted-glass HUD overlaying your active virtual desktop with:
+  - Live elapsed time indicator & attendee summary
+  - **Microphone (`M`)** and **Camera (`V`)** tiles (persisted in `~/.config/meetjoiner/preferences.json`, defaulting to both off)
+  - **Snooze 2m (`S`)**, **Join Meeting (`Return`)**, and **Dismiss (`Esc` / `✕`)**
+- When you click **Join Meeting**, opens the Meet link in Chrome, sets your chosen mic/camera state on the pre-join screen, and clicks "Join now"
 
 ## Logs
 
